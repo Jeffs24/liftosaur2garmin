@@ -1,0 +1,18 @@
+services:
+  liftosaur2garmin:
+    build: .
+    image: liftosaur2garmin:latest
+    container_name: liftosaur2garmin
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - l2g-data:/data
+
+volumes:
+  l2g-data:
