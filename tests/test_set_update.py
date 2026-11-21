@@ -627,3 +627,71 @@ class TestUpdateExistingActivitySets:
             result = update_existing_activity_sets(client, 123, workout)
             assert result is False
             mock_update.assert_not_called()
+
+
+class TestSingleGarminExerciseRebuild:
+    """Watch recorded the whole workout as one exercise — all Liftosaur exercises must end up on Garmin."""
+
+    def _single_exercise_garmin_sets(self, count: int) -> list[dict]:
+        sets: list[dict] = []
+        for i in range(count):
+            sets.append(_active_set("BP", "BENCH", 9, 50000, start=f"2026-04-01T20:{i * 2:02d}:00.0"))
+            sets.append(_rest_set())
+        return sets
+
+    def test_relabels_sets_across_all_exercises(self, sample_workout: dict) -> None:
+        client = MagicMock()
+        with patch("liftosaur2garmin.sync.get_exercise_sets") as mock_get, \
+             patch("liftosaur2garmin.sync.update_exercise_sets") as mock_update:
+            mock_get.return_value = self._single_exercise_garmin_sets(6)
+            assert update_existing_activity_sets(client, 123, sample_workout) is True
+            updated = mock_update.call_args[0][2]
+
+        active = [s for s in updated if s["setType"] == "ACTIVE"]
+        assert len(active) == 6
+        assert [s["exercises"][0]["category"] for s in active] == ["BENCH_PRESS"] * 4 + ["SHOULDER_PRESS"] * 2
+        assert active[0]["exercises"][0]["name"] == "BARBELL_BENCH_PRESS"
+        assert [s["repetitionCount"] for s in active] == [12, 10, 8, 7, 12, 10]
+        assert active[4]["weight"] == 14000
+        # Garmin timing is preserved
+        assert active[5]["startTime"] == "2026-04-01T20:10:00.0"
+
+    def test_adds_missing_sets_after_last_garmin_set(self, sample_workout: dict) -> None:
+        client = MagicMock()
+        with patch("liftosaur2garmin.sync.get_exercise_sets") as mock_get, \
+             patch("liftosaur2garmin.sync.update_exercise_sets") as mock_update:
+            mock_get.return_value = self._single_exercise_garmin_sets(3)
+            assert update_existing_activity_sets(client, 123, sample_workout) is True
+            updated = mock_update.call_args[0][2]
+
+        active = [s for s in updated if s["setType"] == "ACTIVE"]
+        assert len(active) == 6
+        assert {s["exercises"][0]["category"] for s in active} == {"BENCH_PRESS", "SHOULDER_PRESS"}
+        starts = [s["startTime"] for s in active]
+        assert all(starts)
+        assert starts == sorted(starts)
+        # First added set starts after the last recorded set + its rest (20:04:00 + 25s + 90s)
+        assert active[3]["startTime"] == "2026-04-01T20:05:55.0"
+
+    def test_drops_surplus_garmin_sets(self, sample_workout: dict) -> None:
+        client = MagicMock()
+        with patch("liftosaur2garmin.sync.get_exercise_sets") as mock_get, \
+             patch("liftosaur2garmin.sync.update_exercise_sets") as mock_update:
+            mock_get.return_value = self._single_exercise_garmin_sets(8)
+            assert update_existing_activity_sets(client, 123, sample_workout) is True
+            updated = mock_update.call_args[0][2]
+
+        active = [s for s in updated if s["setType"] == "ACTIVE"]
+        assert len(active) == 6
+        assert active[-1]["exercises"][0]["category"] == "SHOULDER_PRESS"
+
+    def test_skips_warmups_when_garmin_count_matches_normal_sets(self, sample_workout: dict) -> None:
+        client = MagicMock()
+        with patch("liftosaur2garmin.sync.get_exercise_sets") as mock_get, \
+             patch("liftosaur2garmin.sync.update_exercise_sets") as mock_update:
+            mock_get.return_value = self._single_exercise_garmin_sets(5)
+            update_existing_activity_sets(client, 123, sample_workout)
+            updated = mock_update.call_args[0][2]
+
+        active = [s for s in updated if s["setType"] == "ACTIVE"]
+        assert [s["repetitionCount"] for s in active] == [10, 8, 7, 12, 10]
