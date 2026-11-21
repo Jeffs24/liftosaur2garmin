@@ -1,7 +1,9 @@
 services:
   liftosaur2garmin:
-    build: .
-    image: liftosaur2garmin:latest
+    # Published on each GitHub release. Pin a version (e.g. :1.1.0) instead of :latest if you prefer.
+    image: ghcr.io/jeffs24/liftosaur2garmin:latest
+    # To build from source instead, comment out `image` above and uncomment:
+    # build: .
     container_name: liftosaur2garmin
     restart: unless-stopped
     ports:
