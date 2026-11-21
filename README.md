@@ -127,6 +127,24 @@ The Garmin token file can be exported with:
 liftosaur2garmin export-garmin-token
 ```
 
+## Docker Compose
+
+A Docker image is published to `ghcr.io/jeffs24/liftosaur2garmin` on every GitHub release (`latest`, `X.Y.Z`, `X.Y`, `X`; amd64 and arm64).
+
+```bash
+cp .env.example .env   # optional, everything can also be set in the dashboard
+docker compose up -d
+```
+
+The dashboard is served on http://localhost:8124 (8123 is left free for Home Assistant). Config, the SQLite database and Garmin tokens are stored in the `l2g-data` volume.
+
+To update to the latest release:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
 ## CLI
 
 ```bash
