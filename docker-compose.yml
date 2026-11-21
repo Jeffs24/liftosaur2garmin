@@ -5,7 +5,7 @@ services:
     container_name: liftosaur2garmin
     restart: unless-stopped
     ports:
-      - "8123:8123"
+      - "8124:8124"
     env_file:
       - path: .env
         required: false
