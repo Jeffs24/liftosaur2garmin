@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -156,8 +157,166 @@ def _apply_liftosaur_values(garmin_sets: list[dict], matches: list[tuple[dict, d
             garmin_sets[idx]["weight"] = round(float(weight_kg) * 1000)
 
 
+DEFAULT_ACTIVE_SET_S = 40.0
+DEFAULT_REST_S = 90.0
+
+
+def _garmin_exercise_label(category: int, subcategory: int) -> dict:
+    """Convert FIT (category, subcategory) ints to Garmin Connect API exercise labels.
+
+    The exerciseSets API uses the FIT SDK enum names as strings, e.g.
+    ``{"category": "BENCH_PRESS", "name": "BARBELL_BENCH_PRESS"}``.
+    """
+    from fit_tool.profile import profile_type
+
+    try:
+        cat_enum = profile_type.ExerciseCategory(category)
+    except ValueError:
+        return {"probability": 100.0, "category": "UNKNOWN", "name": None}
+
+    cat_name = cat_enum.name
+    enum_cls_name = "".join(part.capitalize() for part in cat_name.split("_")) + "ExerciseName"
+    enum_cls = getattr(profile_type, enum_cls_name, None)
+    sub_name = None
+    if enum_cls is not None:
+        try:
+            sub_name = enum_cls(subcategory).name
+        except ValueError:
+            sub_name = None
+    return {"probability": 100.0, "category": cat_name, "name": sub_name}
+
+
+def _parse_garmin_time(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        pass
+    try:
+        base, _, frac = raw.partition(".")
+        dt = datetime.fromisoformat(base)
+        return dt + timedelta(seconds=float(f"0.{frac}")) if frac else dt
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_garmin_time(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{dt.microsecond // 100000}"
+
+
+def _select_liftosaur_sets(liftosaur_exercises: list[dict], garmin_active_count: int) -> list[tuple[int, dict, dict]]:
+    """Flatten Liftosaur sets in workout order as (exercise index, exercise, set).
+
+    Uses warmup + normal sets, unless dropping warmups makes the count match
+    what Garmin recorded (warmups not tracked on the watch).
+    """
+    all_sets: list[tuple[int, dict, dict]] = []
+    normal_sets: list[tuple[int, dict, dict]] = []
+    for ex_idx, ex in enumerate(liftosaur_exercises):
+        sets = ex.get("sets", [])
+        warmup = [s for s in sets if s.get("type") == "warmup"]
+        normal = [s for s in sets if s.get("type") != "warmup"]
+        all_sets.extend((ex_idx, ex, s) for s in warmup + normal)
+        normal_sets.extend((ex_idx, ex, s) for s in normal)
+    if garmin_active_count == len(normal_sets) and garmin_active_count != len(all_sets):
+        return normal_sets
+    return all_sets
+
+
+def _rebuild_sets_from_liftosaur(garmin_sets: list[dict], liftosaur_exercises: list[dict]) -> list[dict]:
+    """Rebuild Garmin's set list so it contains every Liftosaur exercise.
+
+    Used when the watch logged the whole session as one exercise. Garmin's
+    recorded ACTIVE sets are reused in order (keeping their timing/HR), and
+    each one is relabelled with the Liftosaur exercise and its reps/weight.
+    Missing sets are appended after the last one; surplus Garmin sets are dropped.
+    """
+    active_idx = [i for i, gs in enumerate(garmin_sets) if gs.get("setType") == "ACTIVE"]
+    chosen = _select_liftosaur_sets(liftosaur_exercises, len(active_idx))
+    if not chosen:
+        return garmin_sets
+
+    first_active = active_idx[0] if active_idx else len(garmin_sets)
+    result: list[dict] = [dict(gs) for gs in garmin_sets[:first_active]]
+    template = dict(garmin_sets[active_idx[-1]]) if active_idx else {"setType": "ACTIVE"}
+    cursor: datetime | None = None
+    for gs in garmin_sets:
+        # REST sets often have no startTime: they start where the previous set ended.
+        start = _parse_garmin_time(gs.get("startTime")) or cursor
+        if start is not None:
+            end = start + timedelta(seconds=float(gs.get("duration") or 0))
+            cursor = end if cursor is None or end > cursor else cursor
+
+    labels: dict[int, dict] = {}
+    for n, (ex_idx, ex, ls) in enumerate(chosen):
+        if ex_idx not in labels:
+            cat, sub, _ = lookup_exercise(ex.get("title") or ex.get("name", ""))
+            labels[ex_idx] = _garmin_exercise_label(cat, sub)
+
+        rest: dict | None = None
+        if n < len(active_idx):
+            i = active_idx[n]
+            active = dict(garmin_sets[i])
+            if i + 1 < len(garmin_sets) and garmin_sets[i + 1].get("setType") == "REST":
+                rest = dict(garmin_sets[i + 1])
+        else:
+            active = dict(template)
+            active["duration"] = DEFAULT_ACTIVE_SET_S
+            if cursor is not None:
+                if result and result[-1].get("setType") == "ACTIVE":
+                    result.append(_make_rest(template, cursor, DEFAULT_REST_S))
+                    cursor += timedelta(seconds=DEFAULT_REST_S)
+                active["startTime"] = _format_garmin_time(cursor)
+                cursor += timedelta(seconds=DEFAULT_ACTIVE_SET_S)
+            else:
+                active["startTime"] = None
+
+        active["setType"] = "ACTIVE"
+        active["exercises"] = [dict(labels[ex_idx])]
+        if "wktStepIndex" in active:
+            active["wktStepIndex"] = ex_idx
+        reps = ls.get("reps")
+        weight_kg = ls.get("weight_kg")
+        active["repetitionCount"] = int(reps) if reps is not None else active.get("repetitionCount")
+        if weight_kg is not None:
+            active["weight"] = round(float(weight_kg) * 1000)
+        result.append(active)
+        if rest is not None:
+            result.append(rest)
+
+    if "messageIndex" in template:
+        for idx, gs in enumerate(result):
+            gs["messageIndex"] = idx
+
+    dropped = len(active_idx) - min(len(active_idx), len(chosen))
+    added = len(chosen) - min(len(active_idx), len(chosen))
+    logger.info(
+        "  Rebuilt Garmin sets from Liftosaur: %d exercises, %d sets (%d added, %d dropped)",
+        len(liftosaur_exercises), len(chosen), added, dropped,
+    )
+    return result
+
+
+def _make_rest(template: dict, start: datetime, duration: float) -> dict:
+    rest = {k: v for k, v in template.items() if k not in ("exercises", "repetitionCount", "weight")}
+    rest.update({
+        "setType": "REST",
+        "exercises": [],
+        "repetitionCount": None,
+        "weight": -1,
+        "duration": duration,
+        "startTime": _format_garmin_time(start),
+    })
+    return rest
+
+
 def update_existing_activity_sets(garmin_client, activity_id: int, workout: dict) -> bool:
     """Fetch existing Garmin sets, match to Liftosaur, and update reps/weight.
+
+    When the watch recorded the whole session as a single exercise but the
+    Liftosaur workout has several, the set list is rebuilt so every Liftosaur
+    exercise appears. Otherwise exercises are matched to Garmin groups by index.
 
     Returns True if sets were updated, False otherwise.
     """
@@ -174,6 +333,15 @@ def update_existing_activity_sets(garmin_client, activity_id: int, workout: dict
 
     if not liftosaur_exercises:
         return False
+
+    if len(garmin_groups) == 1 and len(liftosaur_exercises) > 1:
+        logger.info(
+            "  Garmin has a single exercise, Liftosaur has %d — overriding with Liftosaur exercises",
+            len(liftosaur_exercises),
+        )
+        rebuilt = _rebuild_sets_from_liftosaur(garmin_sets, liftosaur_exercises)
+        update_exercise_sets(garmin_client, activity_id, rebuilt)
+        return True
 
     any_matched = False
     for ex_idx, liftosaur_ex in enumerate(liftosaur_exercises):
