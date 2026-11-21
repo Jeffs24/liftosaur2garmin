@@ -227,8 +227,7 @@ def _select_liftosaur_sets(liftosaur_exercises: list[dict], garmin_active_count:
 def _rebuild_sets_from_liftosaur(garmin_sets: list[dict], liftosaur_exercises: list[dict]) -> list[dict]:
     """Rebuild Garmin's set list so it contains every Liftosaur exercise.
 
-    Used when the watch's exercise grouping doesn't line up with Liftosaur
-    (e.g. the watch logged the whole session as one exercise). Garmin's
+    Used when the watch logged the whole session as one exercise. Garmin's
     recorded ACTIVE sets are reused in order (keeping their timing/HR), and
     each one is relabelled with the Liftosaur exercise and its reps/weight.
     Missing sets are appended after the last one; surplus Garmin sets are dropped.
@@ -315,9 +314,9 @@ def _make_rest(template: dict, start: datetime, duration: float) -> dict:
 def update_existing_activity_sets(garmin_client, activity_id: int, workout: dict) -> bool:
     """Fetch existing Garmin sets, match to Liftosaur, and update reps/weight.
 
-    When the Garmin activity's exercise grouping doesn't line up with the
-    Liftosaur workout (e.g. the watch recorded everything as a single
-    exercise), the set list is rebuilt so every Liftosaur exercise appears.
+    When the watch recorded the whole session as a single exercise but the
+    Liftosaur workout has several, the set list is rebuilt so every Liftosaur
+    exercise appears. Otherwise exercises are matched to Garmin groups by index.
 
     Returns True if sets were updated, False otherwise.
     """
@@ -335,10 +334,10 @@ def update_existing_activity_sets(garmin_client, activity_id: int, workout: dict
     if not liftosaur_exercises:
         return False
 
-    if len(garmin_groups) != len(liftosaur_exercises):
+    if len(garmin_groups) == 1 and len(liftosaur_exercises) > 1:
         logger.info(
-            "  Garmin has %d exercise group(s), Liftosaur has %d exercise(s) — rebuilding sets",
-            len(garmin_groups), len(liftosaur_exercises),
+            "  Garmin has a single exercise, Liftosaur has %d — overriding with Liftosaur exercises",
+            len(liftosaur_exercises),
         )
         rebuilt = _rebuild_sets_from_liftosaur(garmin_sets, liftosaur_exercises)
         update_exercise_sets(garmin_client, activity_id, rebuilt)

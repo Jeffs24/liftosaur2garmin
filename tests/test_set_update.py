@@ -695,3 +695,38 @@ class TestSingleGarminExerciseRebuild:
 
         active = [s for s in updated if s["setType"] == "ACTIVE"]
         assert [s["repetitionCount"] for s in active] == [10, 8, 7, 12, 10]
+
+    def test_keeps_index_matching_when_garmin_has_several_exercises(self, sample_workout: dict) -> None:
+        """Rebuild only applies to a single Garmin exercise; otherwise behaviour is unchanged."""
+        workout = {
+            **sample_workout,
+            "exercises": sample_workout["exercises"] + [
+                {"title": "Bicep Curl (Dumbbell)", "sets": [_liftosaur_set("normal", 12, 10)]},
+            ],
+        }
+        garmin_sets = [
+            _active_set("BP", "BENCH", 12, 40000),
+            _rest_set(),
+            _active_set("BP", "BENCH", 10, 60000),
+            _rest_set(),
+            _active_set("BP", "BENCH", 8, 60000),
+            _rest_set(),
+            _active_set("BP", "BENCH", 7, 60000),
+            _rest_set(),
+            _active_set("SP", "SHOULDER_PRESS", 11, 12000),
+            _rest_set(),
+            _active_set("SP", "SHOULDER_PRESS", 9, 12000),
+            _rest_set(),
+        ]
+        client = MagicMock()
+        with patch("liftosaur2garmin.sync.get_exercise_sets") as mock_get, \
+             patch("liftosaur2garmin.sync.update_exercise_sets") as mock_update:
+            mock_get.return_value = garmin_sets
+            assert update_existing_activity_sets(client, 123, workout) is True
+            updated = mock_update.call_args[0][2]
+
+        assert len(updated) == len(garmin_sets)
+        # Original Garmin labels kept, no curl set added
+        assert [s["exercises"][0]["category"] for s in updated if s["setType"] == "ACTIVE"] == ["BP"] * 4 + ["SP"] * 2
+        assert updated[8]["repetitionCount"] == 12
+        assert updated[8]["weight"] == 14000
